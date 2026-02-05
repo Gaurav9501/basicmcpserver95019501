@@ -1,139 +1,169 @@
-import asyncio
+from typing import Any, Optional
+import os
 import json
-from typing import Optional
 
 import httpx
-from mcp.server import Server
-from mcp.types import Tool, ToolResponse
-from mcp.codec import (
-    read_message_async,
-    write_message_async,
-)
+from mcp.server.fastmcp import FastMCP
+
+# Initialize FastMCP server
+mcp = FastMCP("movies")
+
+# Base URL of your FastAPI Movies API (override with env if needed)
+MOVIE_API_BASE = os.getenv("MOVIE_API_BASE", "https://basicrud95019501.onrender.com")
+
+# Default headers for JSON APIs
+JSON_HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
 
 
-MOVIE_API_URL = "https://basicrud95019501.onrender.com"   # << your FastAPI
-
-
-# -------------------------------------------------------------------
-# MCP SERVER
-# -------------------------------------------------------------------
-server = Server("movie-mcp-server")
-
-
-# -----------------------
-# Tools Definition
-# -----------------------
-@server.tool(
-    Tool(
-        name="get_movies",
-        description="Get all movies from FastAPI backend.",
-        input_schema={"type": "object", "properties": {}},
-    )
-)
-async def get_movies_handler(params):
+# ---------------------------
+# HTTP helper
+# ---------------------------
+async def api_request(
+    method: str,
+    path: str,
+    json_body: Optional[dict[str, Any]] = None,
+    timeout: float = 30.0,
+) -> tuple[int, Optional[dict[str, Any]]]:
+    """
+    Make an HTTP request to the Movies API and return (status_code, json_or_none).
+    Handles 204/empty responses gracefully.
+    """
+    url = f"{MOVIE_API_BASE}{path}"
     async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{MOVIE_API_URL}/movies")
-        return ToolResponse(content=json.dumps(resp.json(), indent=2))
+        try:
+            resp = await client.request(
+                method=method.upper(),
+                url=url,
+                json=json_body,
+                headers=JSON_HEADERS,
+                timeout=timeout,
+            )
+            # Some endpoints (e.g., DELETE) may return 204 No Content
+            if resp.status_code == 204 or not resp.content:
+                return resp.status_code, None
+
+            # Try to parse JSON; if it fails, return None with status
+            try:
+                return resp.status_code, resp.json()
+            except Exception:
+                return resp.status_code, None
+        except Exception as e:
+            # Network/timeout/errors — surface a 0 code to indicate transport failure
+            return 0, {"error": str(e), "url": url, "method": method, "body": json_body}
 
 
-@server.tool(
-    Tool(
-        name="get_movie",
-        description="Get a movie by its movie_id",
-        input_schema={
-            "type": "object",
-            "properties": {"movie_id": {"type": "integer"}},
-            "required": ["movie_id"],
-        },
-    )
-)
-async def get_movie_handler(params):
-    movie_id = params["movie_id"]
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{MOVIE_API_URL}/movies/{movie_id}")
-        return ToolResponse(content=json.dumps(resp.json(), indent=2))
+def pretty(data: Any) -> str:
+    """Pretty print Python objects as JSON string for readable tool output."""
+    try:
+        return json.dumps(data, indent=2, ensure_ascii=False)
+    except Exception:
+        return str(data)
 
 
-@server.tool(
-    Tool(
-        name="create_movie",
-        description="Create a new movie",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "title": {"type": "string"},
-                "year": {"type": "integer"},
-                "rating": {"type": "number"},
-            },
-            "required": ["title", "year", "rating"],
-        },
-    )
-)
-async def create_movie_handler(params):
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(f"{MOVIE_API_URL}/movies", json=params)
-        return ToolResponse(content=json.dumps(resp.json(), indent=2))
+# ---------------------------
+# Tools
+# ---------------------------
+
+@mcp.tool()
+async def get_movies() -> str:
+    """
+    Get all movies from the FastAPI backend.
+    Returns a pretty JSON string of the list.
+    """
+    status, data = await api_request("GET", "/movies")
+    if status == 0:
+        return f"Transport error while calling /movies:\n{pretty(data)}"
+    if status >= 400:
+        return f"Error {status} from /movies:\n{pretty(data)}"
+    return pretty(data)
 
 
-@server.tool(
-    Tool(
-        name="update_movie",
-        description="Update movie by movie_id",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "movie_id": {"type": "integer"},
-                "title": {"type": "string"},
-                "year": {"type": "integer"},
-                "rating": {"type": "number"},
-            },
-            "required": ["movie_id", "title", "year", "rating"],
-        },
-    )
-)
-async def update_movie_handler(params):
-    movie_id = params["movie_id"]
-    body = {
-        "title": params["title"],
-        "year": params["year"],
-        "rating": params["rating"],
-    }
-    async with httpx.AsyncClient() as client:
-        resp = await client.put(f"{MOVIE_API_URL}/movies/{movie_id}", json=body)
-        return ToolResponse(content=json.dumps(resp.json(), indent=2))
+@mcp.tool()
+async def get_movie(movie_id: int) -> str:
+    """
+    Get a single movie by its ID.
+
+    Args:
+        movie_id: The numeric ID of the movie.
+    """
+    status, data = await api_request("GET", f"/movies/{movie_id}")
+    if status == 0:
+        return f"Transport error while calling /movies/{movie_id}:\n{pretty(data)}"
+    if status == 404:
+        return f"Movie {movie_id} not found."
+    if status >= 400:
+        return f"Error {status} from /movies/{movie_id}:\n{pretty(data)}"
+    return pretty(data)
 
 
-@server.tool(
-    Tool(
-        name="delete_movie",
-        description="Delete movie by movie_id",
-        input_schema={
-            "type": "object",
-            "properties": {"movie_id": {"type": "integer"}},
-            "required": ["movie_id"],
-        },
-    )
-)
-async def delete_movie_handler(params):
-    movie_id = params["movie_id"]
-    async with httpx.AsyncClient() as client:
-        resp = await client.delete(f"{MOVIE_API_URL}/movies/{movie_id}")
-        return ToolResponse(content=json.dumps({"status": resp.status_code}, indent=2))
+@mcp.tool()
+async def create_movie(title: str, year: int, rating: float) -> str:
+    """
+    Create a new movie.
+
+    Args:
+        title: Movie title
+        year: Release year
+        rating: Rating as float (e.g., 8.6)
+    """
+    body = {"title": title, "year": year, "rating": rating}
+    status, data = await api_request("POST", "/movies", json_body=body)
+    if status == 0:
+        return f"Transport error while POST /movies:\n{pretty(data)}"
+    if status >= 400:
+        return f"Error {status} creating movie:\n{pretty(data)}"
+    return f"Movie created:\n{pretty(data)}"
 
 
-# -------------------------------------------------------------------
-# MAIN LOOP
-# -------------------------------------------------------------------
-async def main():
-    while True:
-        msg = await read_message_async()
-        if msg is None:
-            break
+@mcp.tool()
+async def update_movie(movie_id: int, title: str, year: int, rating: float) -> str:
+    """
+    Update an existing movie by ID.
 
-        reply = await server.handle_message(msg)
-        if reply is not None:
-            await write_message_async(reply)
+    Args:
+        movie_id: The target movie ID
+        title: New title
+        year: New year
+        rating: New rating
+    """
+    body = {"title": title, "year": year, "rating": rating}
+    status, data = await api_request("PUT", f"/movies/{movie_id}", json_body=body)
+    if status == 0:
+        return f"Transport error while PUT /movies/{movie_id}:\n{pretty(data)}"
+    if status == 404:
+        return f"Movie {movie_id} not found."
+    if status >= 400:
+        return f"Error {status} updating movie {movie_id}:\n{pretty(data)}"
+    return f"Movie updated:\n{pretty(data)}"
+
+
+@mcp.tool()
+async def delete_movie(movie_id: int) -> str:
+    """
+    Delete a movie by ID.
+
+    Args:
+        movie_id: The target movie ID
+    """
+    status, data = await api_request("DELETE", f"/movies/{movie_id}")
+    if status == 0:
+        return f"Transport error while DELETE /movies/{movie_id}:\n{pretty(data)}"
+    if status == 404:
+        return f"Movie {movie_id} not found."
+    if status >= 400:
+        return f"Error {status} deleting movie {movie_id}:\n{pretty(data)}"
+    return f"Movie {movie_id} deleted (status {status})."
+
+
+# ---------------------------
+# Entry point
+# ---------------------------
+def main():
+    # Run the MCP server over stdio (for hosts/clients to connect)
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+
+ 
